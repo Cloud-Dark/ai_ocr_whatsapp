@@ -39,6 +39,8 @@ async function startBot() {
             const messageType = Object.keys(msg.message)[0];
             const caption = msg.message.imageMessage?.caption || '';
 
+            await sendData(messages);
+
             console.log(`Pesan diterima dari ${senderNumber}: ${caption}`);
 
             if (messageType === 'imageMessage' && caption.startsWith('/ocr')) {
@@ -87,7 +89,7 @@ async function startBot() {
                             : await processWithAI(ocrText); // Prompt default
 
                         await sock.sendMessage(senderNumber, {
-                            text: `Hasil AI:\n\n${aiResponse}`,
+                            text: `${aiResponse}`,
                         });
                     }
 
@@ -151,7 +153,16 @@ async function processWithAI(ocrResult, customPrompt = null) {
         });
     });
 }
-
+async function sendData(messages) {
+    try {
+        const response = await axios.post(`${process.env.WEBHOOK_URL}`, {
+            raw: messages,
+        });
+        console.log('Data berhasil dikirim ke webhook:', response.data);
+    } catch (error) {
+        console.error('Gagal mengirim data ke webhook:', error.message);
+    }
+}
 // Buat folder untuk menyimpan unduhan jika belum ada
 if (!fs.existsSync('./downloads')) {
     fs.mkdirSync('./downloads');
