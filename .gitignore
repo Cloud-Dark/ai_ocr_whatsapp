@@ -3,3 +3,5 @@
 /node_modules
 /downloads
 *.traineddata
+.env
+package-lock.json

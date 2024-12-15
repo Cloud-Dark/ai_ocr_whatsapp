@@ -1,9 +1,11 @@
+require('dotenv').config();
 const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const Tesseract = require('tesseract.js'); // Library OCR
+const Tesseract = require('tesseract.js');
+const request = require('request');
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
@@ -34,18 +36,12 @@ async function startBot() {
         if (type === 'notify' && messages[0]?.message) {
             const msg = messages[0];
             const senderNumber = msg.key.remoteJid;
-            const messageType = Object.keys(msg.message)[0]; // Dapatkan jenis pesan
-            const messageContent = msg.message.conversation || msg.message.extendedTextMessage?.text;
+            const messageType = Object.keys(msg.message)[0];
+            const caption = msg.message.imageMessage?.caption || '';
 
-            console.log(`Pesan diterima dari ${senderNumber}: ${messageContent}`);
+            console.log(`Pesan diterima dari ${senderNumber}: ${caption}`);
 
-            // Kirim data ke webhook
-            sendData(senderNumber, messageContent, messages);
-
-            if (messageType === 'imageMessage' && msg.message.imageMessage.caption?.startsWith('/ocr')) {
-                console.log('Pesan berupa gambar dengan perintah /ocr, mulai proses OCR...');
-
-                // Kirim balasan awal
+            if (messageType === 'imageMessage' && caption.startsWith('/ocr')) {
                 await sock.sendMessage(senderNumber, {
                     text: 'Image diterima, sedang membaca image...',
                 });
@@ -67,40 +63,93 @@ async function startBot() {
                     fs.writeFileSync(tempPath, buffer);
 
                     // Proses OCR
-                    const { data: { text } } = await Tesseract.recognize(tempPath, 'eng');
-                    console.log('Hasil OCR:', text);
+                    const { data: { text: ocrText } } = await Tesseract.recognize(tempPath, 'eng+ind');
+                    console.log('Hasil OCR:', ocrText);
 
-                    // Kirim hasil OCR ke pengirim
-                    await sock.sendMessage(senderNumber, {
-                        text: `Isi dari gambar Anda adalah:\n\n${text.trim()}`,
-                    });
+                    if (caption === '/ocr') {
+                        // Perintah: /ocr
+                        await sock.sendMessage(senderNumber, {
+                            text: `Isi dari gambar Anda adalah:\n\n${ocrText.trim()}`,
+                        });
+                    } else if (caption.startsWith('/ocr /ai')) {
+                        // Perintah: /ocr /ai atau /ocr /ai (text command)
+                        const customPromptMatch = caption.match(/\(.*?\)/);
+                        const customPrompt = customPromptMatch
+                            ? customPromptMatch[0].slice(1, -1) // Ambil isi dalam tanda kurung
+                            : null;
+
+                        await sock.sendMessage(senderNumber, {
+                            text: 'Hasil OCR diterima, sedang diproses oleh AI...',
+                        });
+
+                        const aiResponse = customPrompt
+                            ? await processWithAI(ocrText, customPrompt) // Prompt khusus
+                            : await processWithAI(ocrText); // Prompt default
+
+                        await sock.sendMessage(senderNumber, {
+                            text: `Hasil AI:\n\n${aiResponse}`,
+                        });
+                    }
 
                     // Hapus file sementara
                     fs.unlinkSync(tempPath);
                 } catch (err) {
                     console.error('Gagal memproses OCR:', err.message);
                     await sock.sendMessage(senderNumber, {
-                        text: 'Maaf, terjadi kesalahan saat memproses gambar Anda untuk OCR.',
+                        text: 'Maaf, terjadi kesalahan saat memproses gambar Anda.',
                     });
                 }
-            } else {
-                console.log('Pesan bukan perintah /ocr.');
             }
         }
     });
 }
 
-async function sendData(sender, message, raw) {
-    try {
-        const response = await axios.post('https://webhook.site/ac259f59-5257-42df-9dc9-23cbc75d7935', {
-            sender: sender,
-            message: message,
-            raw: raw,
+// Fungsi untuk memproses OCR dengan AI
+async function processWithAI(ocrResult, customPrompt = null) {
+    const systemPrompt = 'Kamu adalah asisten pribadi yang dapat merapikan hasil OCR. Jangan gunakan format markdown. Berikan hasil yang rapi dan mudah dibaca tanpa menambahkan kata-kata lain.';
+    return new Promise((resolve, reject) => {
+        const options = {
+            method: 'POST',
+            url: process.env.AI_API_URL, // URL dari ENV
+            headers: {
+                Authorization: `Bearer ${process.env.AI_API_TOKEN}`, // Token dari ENV
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                messages: [
+                    {
+                        role: 'system',
+                        content: customPrompt || systemPrompt, // Gunakan prompt default atau khusus
+                    },
+                    {
+                        role: 'user',
+                        content: ocrResult,
+                    },
+                ],
+            }),
+        };
+
+        request(options, (error, response, body) => {
+            if (error) {
+                console.error('Gagal memproses AI:', error.message);
+                reject('Gagal memproses AI');
+            } else {
+                try {
+                    const aiResponse = JSON.parse(body);
+                    const result = aiResponse.result?.response || 'AI tidak memberikan respons yang valid.';
+                    const resultFormatted = result
+                        .replace(/\*\*([^*]+)\*\*/g, '*$1*') // Ganti ** dengan 1 bintang *
+                        .replace(/^\s*\*\s/gm, '- ') // Ganti * di awal baris dengan -
+                        .replace(/(\*\s[^*]+):/g, '$1 :'); // Tambahkan spasi setelah bintang sebelum titik dua
+                    console.log('Respons dari AI:', resultFormatted);
+                    resolve(resultFormatted);
+                } catch (err) {
+                    console.error('Kesalahan saat memparsing respons AI:', err.message);
+                    reject('Kesalahan saat memproses respons AI.');
+                }
+            }
         });
-        console.log('Data berhasil dikirim ke webhook:', response.data);
-    } catch (error) {
-        console.error('Gagal mengirim data ke webhook:', error.message);
-    }
+    });
 }
 
 // Buat folder untuk menyimpan unduhan jika belum ada
